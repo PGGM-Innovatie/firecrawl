@@ -42,4 +42,4 @@ COPY --from=go-base /app/src/lib/go-html-to-md/html-to-markdown.so /app/dist/src
 EXPOSE $PORT
 ENV PUPPETEER_EXECUTABLE_PATH="/usr/bin/chromium"
 
-ENTRYPOINT [ "pnpm", "run", "start:production" ]
+ENTRYPOINT [ "pnpm", "run", "worker:production" ]
