@@ -1,4 +1,3 @@
-import { createReadStream, promises as fs } from "node:fs";
 import { Meta } from "../..";
 import { EngineScrapeResult } from "..";
 import * as marked from "marked";
@@ -8,124 +7,143 @@ import * as Sentry from "@sentry/node";
 import escapeHtml from "escape-html";
 import PdfParse from "pdf-parse";
 import { downloadFile, fetchFileToBuffer } from "../utils/downloadFile";
+import { RemoveFeatureError, UnsupportedFileError } from "../../error";
+import { readFile, unlink } from "node:fs/promises";
+import path from "node:path";
 
-type PDFProcessorResult = {html: string, markdown?: string};
+type PDFProcessorResult = { html: string; markdown?: string };
 
-async function scrapePDFWithLlamaParse(meta: Meta, tempFilePath: string): Promise<PDFProcessorResult> {
-    meta.logger.debug("Processing PDF document with LlamaIndex", { tempFilePath });
+const MAX_FILE_SIZE = 19 * 1024 * 1024; // 19MB
 
-    const uploadForm = new FormData();
+async function scrapePDFWithRunPodMU(
+  meta: Meta,
+  tempFilePath: string,
+  timeToRun: number | undefined,
+  base64Content: string,
+): Promise<PDFProcessorResult> {
+  meta.logger.debug("Processing PDF document with RunPod MU", {
+    tempFilePath,
+  });
 
-    // This is utterly stupid but it works! - mogery
-    uploadForm.append("file", {
-        [Symbol.toStringTag]: "Blob",
-        name: tempFilePath,
-        stream() {
-            return createReadStream(tempFilePath) as unknown as ReadableStream<Uint8Array>
-        },
-        arrayBuffer() {
-            throw Error("Unimplemented in mock Blob: arrayBuffer")
-        },
-        size: (await fs.stat(tempFilePath)).size,
-        text() {
-            throw Error("Unimplemented in mock Blob: text")
-        },
-        slice(start, end, contentType) {
-            throw Error("Unimplemented in mock Blob: slice")
-        },
-        type: "application/pdf",
-    } as Blob);
+  const result = await robustFetch({
+    url:
+      "https://api.runpod.ai/v2/" + process.env.RUNPOD_MU_POD_ID + "/runsync",
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.RUNPOD_MU_API_KEY}`,
+    },
+    body: {
+      input: {
+        file_content: base64Content,
+        filename: path.basename(tempFilePath) + ".pdf",
+      },
+    },
+    logger: meta.logger.child({
+      method: "scrapePDFWithRunPodMU/robustFetch",
+    }),
+    schema: z.object({
+      output: z.object({
+        markdown: z.string(),
+      }),
+    }),
+  });
 
-    const upload = await robustFetch({
-        url: "https://api.cloud.llamaindex.ai/api/parsing/upload",
-        method: "POST",
-        headers: {
-            "Authorization": `Bearer ${process.env.LLAMAPARSE_API_KEY}`,
-        },
-        body: uploadForm,
-        logger: meta.logger.child({ method: "scrapePDFWithLlamaParse/upload/robustFetch" }),
-        schema: z.object({
-            id: z.string(),
-        }),
-    });
-
-    const jobId = upload.id;
-
-    // TODO: timeout, retries
-    const result = await robustFetch({
-        url: `https://api.cloud.llamaindex.ai/api/parsing/job/${jobId}/result/markdown`,
-        method: "GET",
-        headers: {
-            "Authorization": `Bearer ${process.env.LLAMAPARSE_API_KEY}`,
-        },
-        logger: meta.logger.child({ method: "scrapePDFWithLlamaParse/result/robustFetch" }),
-        schema: z.object({
-            markdown: z.string(),
-        }),
-        tryCount: 32,
-        tryCooldown: 250,
-    });
-    
-    return {
-        markdown: result.markdown,
-        html: await marked.parse(result.markdown, { async: true }),
-    };
+  return {
+    markdown: result.output.markdown,
+    html: await marked.parse(result.output.markdown, { async: true }),
+  };
 }
 
-async function scrapePDFWithParsePDF(meta: Meta, tempFilePath: string): Promise<PDFProcessorResult> {
-    meta.logger.debug("Processing PDF document with parse-pdf", { tempFilePath });
+async function scrapePDFWithParsePDF(
+  meta: Meta,
+  tempFilePath: string,
+): Promise<PDFProcessorResult> {
+  meta.logger.debug("Processing PDF document with parse-pdf", { tempFilePath });
 
-    const result = await PdfParse(await fs.readFile(tempFilePath));
-    const escaped = escapeHtml(result.text);
+  const result = await PdfParse(await readFile(tempFilePath));
+  const escaped = escapeHtml(result.text);
 
-    return {
-        markdown: escaped,
-        html: escaped,
-    };
+  return {
+    markdown: escaped,
+    html: escaped,
+  };
 }
 
-export async function scrapePDF(meta: Meta): Promise<EngineScrapeResult> {
-    if (!meta.options.parsePDF) {
-        const file = await fetchFileToBuffer(meta.url);
-        const content = file.buffer.toString("base64");
-        return {
-            url: file.response.url,
-            statusCode: file.response.status,
-
-            html: content,
-            markdown: content,
-        };
-    }
-
-    const { response, tempFilePath } = await downloadFile(meta.id, meta.url);
-
-    let result: PDFProcessorResult | null = null;
-    if (process.env.LLAMAPARSE_API_KEY) {
-        try {
-            result = await scrapePDFWithLlamaParse({
-                ...meta,
-                logger: meta.logger.child({ method: "scrapePDF/scrapePDFWithLlamaParse" }),
-            }, tempFilePath);
-        } catch (error) {
-            meta.logger.warn("LlamaParse failed to parse PDF -- falling back to parse-pdf", { error });
-            Sentry.captureException(error);
-        }
-    }
-
-    if (result === null) {
-        result = await scrapePDFWithParsePDF({
-            ...meta,
-            logger: meta.logger.child({ method: "scrapePDF/scrapePDFWithParsePDF" }),
-        }, tempFilePath);
-    }
-
-    await fs.unlink(tempFilePath);
-
+export async function scrapePDF(
+  meta: Meta,
+  timeToRun: number | undefined,
+): Promise<EngineScrapeResult> {
+  if (!meta.options.parsePDF) {
+    const file = await fetchFileToBuffer(meta.url, {
+      headers: meta.options.headers,
+    });
+    const content = file.buffer.toString("base64");
     return {
-        url: response.url,
-        statusCode: response.status,
+      url: file.response.url,
+      statusCode: file.response.status,
 
-        html: result.html,
-        markdown: result.markdown,
+      html: content,
+      markdown: content,
+    };
+  }
+
+  const { response, tempFilePath } = await downloadFile(meta.id, meta.url, {
+    headers: meta.options.headers,
+  });
+
+  let result: PDFProcessorResult | null = null;
+
+  const base64Content = (await readFile(tempFilePath)).toString("base64");
+
+  // First try RunPod MU if conditions are met
+  if (
+    base64Content.length < MAX_FILE_SIZE &&
+    process.env.RUNPOD_MU_API_KEY &&
+    process.env.RUNPOD_MU_POD_ID
+  ) {
+    try {
+      result = await scrapePDFWithRunPodMU(
+        {
+          ...meta,
+          logger: meta.logger.child({
+            method: "scrapePDF/scrapePDFWithRunPodMU",
+          }),
+        },
+        tempFilePath,
+        timeToRun,
+        base64Content,
+      );
+    } catch (error) {
+      if (error instanceof RemoveFeatureError) {
+        throw error;
+      }
+      meta.logger.warn(
+        "RunPod MU failed to parse PDF (could be due to timeout) -- falling back to parse-pdf",
+        { error },
+      );
+      Sentry.captureException(error);
     }
+  }
+
+  // If RunPod MU failed or wasn't attempted, use PdfParse
+  if (!result) {
+    result = await scrapePDFWithParsePDF(
+      {
+        ...meta,
+        logger: meta.logger.child({
+          method: "scrapePDF/scrapePDFWithParsePDF",
+        }),
+      },
+      tempFilePath,
+    );
+  }
+
+  await unlink(tempFilePath);
+
+  return {
+    url: response.url,
+    statusCode: response.status,
+    html: result?.html ?? "",
+    markdown: result?.markdown ?? "",
+  };
 }

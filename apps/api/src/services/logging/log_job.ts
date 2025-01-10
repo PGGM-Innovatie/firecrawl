@@ -7,28 +7,46 @@ import { logger } from "../../lib/logger";
 import { configDotenv } from "dotenv";
 configDotenv();
 
+function cleanOfNull<T>(x: T): T {
+  if (Array.isArray(x)) {
+    return x.map(x => cleanOfNull(x)) as T;
+  } else if (typeof x === "object" && x !== null) {
+    return Object.fromEntries(Object.entries(x).map(([k,v]) => [k,cleanOfNull(v)])) as T
+  } else if (typeof x === "string") {
+    return x.replaceAll("\u0000", "") as T;
+  } else {
+    return x;
+  }
+}
+
 export async function logJob(job: FirecrawlJob, force: boolean = false) {
   try {
-    const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === 'true';
+    const useDbAuthentication = process.env.USE_DB_AUTHENTICATION === "true";
     if (!useDbAuthentication) {
       return;
     }
 
     // Redact any pages that have an authorization header
-    if (
-      job.scrapeOptions &&
-      job.scrapeOptions.headers &&
-      job.scrapeOptions.headers["Authorization"]
-    ) {
-      job.scrapeOptions.headers["Authorization"] = "REDACTED";
-      job.docs = [{ content: "REDACTED DUE TO AUTHORIZATION HEADER", html: "REDACTED DUE TO AUTHORIZATION HEADER" }];
-    }
+    // actually, Don't. we use the db to retrieve results now. this breaks authed crawls - mogery
+    // if (
+    //   job.scrapeOptions &&
+    //   job.scrapeOptions.headers &&
+    //   job.scrapeOptions.headers["Authorization"]
+    // ) {
+    //   job.scrapeOptions.headers["Authorization"] = "REDACTED";
+    //   job.docs = [
+    //     {
+    //       content: "REDACTED DUE TO AUTHORIZATION HEADER",
+    //       html: "REDACTED DUE TO AUTHORIZATION HEADER",
+    //     },
+    //   ];
+    // }
     const jobColumn = {
       job_id: job.job_id ? job.job_id : null,
       success: job.success,
       message: job.message,
       num_docs: job.num_docs,
-      docs: job.docs,
+      docs: cleanOfNull(job.docs),
       time_taken: job.time_taken,
       team_id: job.team_id === "preview" ? null : job.team_id,
       mode: job.mode,
@@ -42,29 +60,47 @@ export async function logJob(job: FirecrawlJob, force: boolean = false) {
     };
 
     if (force) {
-      while (true) {
+      let i = 0,
+        done = false;
+      while (i++ <= 10) {
         try {
           const { error } = await supabase_service
             .from("firecrawl_jobs")
             .insert([jobColumn]);
           if (error) {
-            logger.error("Failed to log job due to Supabase error -- trying again", { error, scrapeId: job.job_id });
-            await new Promise<void>((resolve) => setTimeout(() => resolve(), 75));
+            logger.error(
+              "Failed to log job due to Supabase error -- trying again",
+              { error, scrapeId: job.job_id },
+            );
+            await new Promise<void>((resolve) =>
+              setTimeout(() => resolve(), 75),
+            );
           } else {
+            done = true;
             break;
           }
         } catch (error) {
-          logger.error("Failed to log job due to thrown error -- trying again", { error, scrapeId: job.job_id });
+          logger.error(
+            "Failed to log job due to thrown error -- trying again",
+            { error, scrapeId: job.job_id },
+          );
           await new Promise<void>((resolve) => setTimeout(() => resolve(), 75));
         }
       }
-      logger.debug("Job logged successfully!", { scrapeId: job.job_id });
+      if (done) {
+        logger.debug("Job logged successfully!", { scrapeId: job.job_id });
+      } else {
+        logger.error("Failed to log job!", { scrapeId: job.job_id });
+      }
     } else {
       const { error } = await supabase_service
         .from("firecrawl_jobs")
         .insert([jobColumn]);
       if (error) {
-        logger.error(`Error logging job: ${error.message}`, { error, scrapeId: job.job_id });
+        logger.error(`Error logging job: ${error.message}`, {
+          error,
+          scrapeId: job.job_id,
+        });
       } else {
         logger.debug("Job logged successfully!", { scrapeId: job.job_id });
       }
@@ -92,11 +128,10 @@ export async function logJob(job: FirecrawlJob, force: boolean = false) {
           retry: job.retry,
         },
       };
-      if(job.mode !== "single_urls") {
+      if (job.mode !== "single_urls") {
         posthog.capture(phLog);
       }
     }
-    
   } catch (error) {
     logger.error(`Error logging job: ${error.message}`);
   }

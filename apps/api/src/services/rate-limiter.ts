@@ -18,6 +18,7 @@ const RATE_LIMITS = {
     etier2c: 300,
     etier1a: 1000,
     etier2a: 300,
+    etierscale1: 150,
   },
   scrape: {
     default: 20,
@@ -34,6 +35,7 @@ const RATE_LIMITS = {
     etier2c: 2500,
     etier1a: 1000,
     etier2a: 2500,
+    etierscale1: 1500,
   },
   search: {
     default: 20,
@@ -50,8 +52,9 @@ const RATE_LIMITS = {
     etier2c: 2500,
     etier1a: 1000,
     etier2a: 2500,
+    etierscale1: 1500,
   },
-  map:{
+  map: {
     default: 20,
     free: 5,
     starter: 50,
@@ -61,11 +64,29 @@ const RATE_LIMITS = {
     hobby: 10,
     standardNew: 50,
     standardnew: 50,
-    growth: 500,
-    growthdouble: 500,
+    growth: 1000,
+    growthdouble: 1000,
     etier2c: 2500,
     etier1a: 1000,
     etier2a: 2500,
+    etierscale1: 1500,
+  },
+  extract: {
+    default: 20,
+    free: 10,
+    starter: 100,
+    standard: 100,
+    standardOld: 100,
+    scale: 300,
+    hobby: 20,
+    standardNew: 100,
+    standardnew: 100,
+    growth: 300,
+    growthdouble: 300,
+    etier2c: 1000,
+    etier1a: 1000,
+    etier2a: 1000,
+    etierscale1: 1000,
   },
   preview: {
     free: 5,
@@ -76,8 +97,8 @@ const RATE_LIMITS = {
     default: 100,
   },
   crawlStatus: {
-    free: 150,
-    default: 250,
+    free: 500,
+    default: 5000,
   },
   testSuite: {
     free: 10000,
@@ -86,8 +107,8 @@ const RATE_LIMITS = {
 };
 
 export const redisRateLimitClient = new Redis(
-  process.env.REDIS_RATE_LIMIT_URL!
-)
+  process.env.REDIS_RATE_LIMIT_URL!,
+);
 
 const createRateLimiter = (keyPrefix, points) =>
   new RateLimiterRedis({
@@ -99,7 +120,7 @@ const createRateLimiter = (keyPrefix, points) =>
 
 export const serverRateLimiter = createRateLimiter(
   "server",
-  RATE_LIMITS.account.default
+  RATE_LIMITS.account.default,
 );
 
 export const testSuiteRateLimiter = new RateLimiterRedis({
@@ -122,7 +143,6 @@ export const manualRateLimiter = new RateLimiterRedis({
   points: 2000,
   duration: 60, // Duration in seconds
 });
-
 
 export const scrapeStatusRateLimiter = new RateLimiterRedis({
   storeClient: redisRateLimitClient,
@@ -162,7 +182,8 @@ const testSuiteTokens = [
   "fd769b2",
   "4c2638d",
   "cbb3462", // don't remove (s-ai)
-  "824abcd" // don't remove (s-ai)
+  "824abcd", // don't remove (s-ai)
+  "0966288",
 ];
 
 const manual = ["69be9e74-7624-4990-b20d-08e0acc70cf6"];
@@ -175,13 +196,13 @@ export function getRateLimiterPoints(
   mode: RateLimiterMode,
   token?: string,
   plan?: string,
-  teamId?: string
-) : number {
+  teamId?: string,
+): number {
   const rateLimitConfig = RATE_LIMITS[mode]; // {default : 5}
 
   if (!rateLimitConfig) return RATE_LIMITS.account.default;
-  
-  const points : number =
+
+  const points: number =
     rateLimitConfig[makePlanKey(plan)] || rateLimitConfig.default; // 5
   return points;
 }
@@ -190,27 +211,34 @@ export function getRateLimiter(
   mode: RateLimiterMode,
   token?: string,
   plan?: string,
-  teamId?: string
- ) : RateLimiterRedis {
-  if (token && testSuiteTokens.some(testToken => token.includes(testToken))) {
+  teamId?: string,
+): RateLimiterRedis {
+  if (token && testSuiteTokens.some((testToken) => token.includes(testToken))) {
     return testSuiteRateLimiter;
   }
 
-  if(teamId && teamId === process.env.DEV_B_TEAM_ID) {
+  if (teamId && teamId === process.env.DEV_B_TEAM_ID) {
     return devBRateLimiter;
   }
-  
-  if(teamId && teamId === process.env.ETIER1A_TEAM_ID) {
+
+  if (teamId && teamId === process.env.ETIER1A_TEAM_ID) {
     return etier1aRateLimiter;
   }
 
-  if(teamId && teamId === process.env.ETIER2A_TEAM_ID) {
+  if (teamId && teamId === process.env.ETIER2A_TEAM_ID) {
     return etier2aRateLimiter;
   }
 
-  if(teamId && manual.includes(teamId)) {
+  if (teamId && teamId === process.env.ETIER2D_TEAM_ID) {
+    return etier2aRateLimiter;
+  }
+
+  if (teamId && manual.includes(teamId)) {
     return manualRateLimiter;
   }
-  
-  return createRateLimiter(`${mode}-${makePlanKey(plan)}`, getRateLimiterPoints(mode, token, plan, teamId));
+
+  return createRateLimiter(
+    `${mode}-${makePlanKey(plan)}`,
+    getRateLimiterPoints(mode, token, plan, teamId),
+  );
 }
