@@ -1,5 +1,8 @@
 name: Clean Every 30 Minutes Before 24h Completed Jobs
 
+on:
+  workflow_dispatch:
+  
 env:
   BULL_AUTH_KEY: ${{ secrets.BULL_AUTH_KEY }}
     
